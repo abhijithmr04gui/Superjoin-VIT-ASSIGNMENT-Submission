@@ -10,3 +10,4 @@ data/vectors/
 venv/
 .DS_Store
 node_modules/
+.vscode/
