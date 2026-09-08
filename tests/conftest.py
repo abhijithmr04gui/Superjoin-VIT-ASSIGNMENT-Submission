@@ -10,7 +10,7 @@ import tempfile
 _TMP_DATA_DIR = tempfile.mkdtemp(prefix="factlayer_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DATA_DIR}/test.db"
 os.environ["DATA_DIR"] = _TMP_DATA_DIR
-os.environ.setdefault("ANTHROPIC_API_KEY", "")  # tests must not hit the real API
+os.environ.setdefault("GEMINI_API_KEY", "")  # tests must not hit the real API
 
 import fitz  # noqa: E402
 import pytest  # noqa: E402
