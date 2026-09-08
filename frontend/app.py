@@ -8,6 +8,7 @@ Run with: streamlit run frontend/app.py
 from __future__ import annotations
 
 import os
+import time
 
 import requests
 import streamlit as st
@@ -49,19 +50,32 @@ with tab_upload:
     st.subheader("Upload a PDF")
     uploaded = st.file_uploader("Choose a PDF", type=["pdf"])
     if uploaded is not None and st.button("Process document"):
-        with st.spinner("Processing (ingest → extract → normalize → compare)..."):
-            try:
-                result = api_post_file("/documents/upload", uploaded.getvalue(), uploaded.name)
-                st.success(
-                    f"Document '{result['document']['filename']}' -> status: {result['document']['status']}"
-                )
-                run = result["run"]
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Facts extracted", run.get("facts_extracted", 0))
-                c2.metric("Relationships created", run.get("relationships_created", 0))
-                c3.metric("Errors recorded", run.get("error_count", 0))
-            except requests.HTTPError as exc:
-                st.error(f"Upload failed: {exc.response.text}")
+        try:
+            result = api_post_file("/documents/upload", uploaded.getvalue(), uploaded.name)
+        except requests.HTTPError as exc:
+            st.error(f"Upload failed: {exc.response.text}")
+            result = None
+
+        if result:
+            document_id = result["document"]["id"]
+            latest = result["run"]
+            status_box = st.empty()
+            with st.spinner("Processing (ingest → extract → normalize → compare)..."):
+                while latest["status"] not in ("completed", "failed"):
+                    status_box.info(f"Stage: {latest.get('current_stage') or latest['status']}")
+                    time.sleep(1.5)
+                    runs = api_get(f"/documents/{document_id}/runs")
+                    if runs:
+                        latest = runs[0]
+
+            if latest["status"] == "failed":
+                st.error("Processing failed — check the Failures tab.")
+            else:
+                st.success(f"Document '{result['document']['filename']}' -> status: {latest['status']}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Facts extracted", latest.get("facts_extracted", 0))
+            c2.metric("Relationships created", latest.get("relationships_created", 0))
+            c3.metric("Errors recorded", latest.get("error_count", 0))
 
     st.divider()
     st.subheader("Documents")
@@ -99,7 +113,7 @@ def render_fact_card(fact: dict, prefix: str = ""):
 
 with tab_facts:
     st.subheader("Browse extracted facts")
-    docs = api_get("/documents") if True else []
+    docs = api_get("/documents")
     doc_options = {d["filename"]: d["id"] for d in docs}
     selected_doc = st.selectbox("Filter by document (optional)", ["All"] + list(doc_options.keys()))
     entity_filter = st.text_input("Filter by entity contains", "")
@@ -143,6 +157,12 @@ with tab_relationships:
                 st.markdown("**Fact B**")
                 render_fact_card(rel["fact_b"])
             st.markdown(f"**Explanation:** {rel['explanation']}")
+            er = rel["contextual_dimensions"].get("entity_resolution")
+            if er:
+                st.caption(
+                    f"Entity match resolved via LLM (confidence {er.get('confidence', 0):.2f}): "
+                    f"{er.get('reasoning', '')}"
+                )
             st.json(rel["contextual_dimensions"])
 
 with tab_search:
