@@ -16,7 +16,7 @@ with explicit confidence and explicit failure handling.
 
 ## Video Demo
 
-`[ADD LINK HERE — 3 minutes or less]`
+[Watch the Video Demo on Google Drive](https://drive.google.com/file/d/1MA7lWEqO6h0HkT6nHJQs0S4-zFny-Nck/view?usp=sharing)
 
 ## Setup and Run Instructions
 
