@@ -110,6 +110,8 @@ class Fact(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     confidence_level: Mapped[str] = mapped_column(String, default="MEDIUM")  # HIGH/MEDIUM/LOW
 
+    embedding: Mapped[list] = mapped_column(JSON, default=list)  # cached dense vector, see vector_store
+
     extraction_method: Mapped[str] = mapped_column(String, default="llm")
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True)
     validation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -146,7 +148,7 @@ class ProcessingRun(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uid)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
-    status: Mapped[str] = mapped_column(String, default="running")  # running/completed/failed
+    status: Mapped[str] = mapped_column(String, default="running")  # pending/running/completed/failed
     current_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     facts_extracted: Mapped[int] = mapped_column(Integer, default=0)
     relationships_created: Mapped[int] = mapped_column(Integer, default=0)

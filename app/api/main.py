@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ from app.models.schemas import (
 )
 from app.pipeline.graph import run_pipeline
 from app.pipeline.ingestion import hash_file
-from app.vector_store.embeddings import cosine_similarity, embed_text
+from app.vector_store.store import find_similar_facts
 
 logger = get_logger("api")
 
@@ -50,11 +50,26 @@ def on_startup() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "llm_configured": bool(settings.anthropic_api_key)}
+    return {"status": "ok", "llm_configured": bool(settings.gemini_api_key)}
+
+
+def _run_pipeline_safely(document_id: str, run_id: str, file_path: str) -> None:
+    try:
+        run_pipeline(document_id, run_id, file_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Pipeline crashed for document %s", document_id)
+        with get_session() as session:
+            doc = session.get(Document, document_id)
+            if doc:
+                doc.status = "failed"
+                doc.error_message = str(exc)
+            run = session.get(ProcessingRun, run_id)
+            if run:
+                run.status = "failed"
 
 
 @app.post("/documents/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile) -> UploadResponse:
+async def upload_document(file: UploadFile, background_tasks: BackgroundTasks) -> UploadResponse:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only .pdf files are supported")
 
@@ -92,33 +107,20 @@ async def upload_document(file: UploadFile) -> UploadResponse:
         session.add(doc)
         session.flush()
 
-        run = ProcessingRun(document_id=doc.id, status="running", current_stage="queued")
+        run = ProcessingRun(document_id=doc.id, status="pending", current_stage="queued")
         session.add(run)
         session.flush()
 
         document_id, run_id = doc.id, run.id
         document_out = DocumentOut.model_validate(doc)
+        run_out = ProcessingRunOut.model_validate(run)
 
-    # Run synchronously - simplest correct behavior for a prototype (see
-    # README trade-offs re: background jobs for large PDFs / many uploads).
-    try:
-        run_pipeline(document_id, run_id, str(dest_path))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Pipeline crashed for document %s", document_id)
-        with get_session() as session:
-            doc = session.get(Document, document_id)
-            doc.status = "failed"
-            doc.error_message = str(exc)
-            run = session.get(ProcessingRun, run_id)
-            run.status = "failed"
+    # Processed in the background so a large PDF (many sequential LLM
+    # calls for extraction + comparison) doesn't block the HTTP response.
+    # The client polls GET /documents/{id}/runs for status/progress.
+    background_tasks.add_task(_run_pipeline_safely, document_id, run_id, str(dest_path))
 
-    with get_session() as session:
-        doc = session.get(Document, document_id)
-        run = session.get(ProcessingRun, run_id)
-        return UploadResponse(
-            document=DocumentOut.model_validate(doc),
-            run=ProcessingRunOut.model_validate(run),
-        )
+    return UploadResponse(document=document_out, run=run_out)
 
 
 def _empty_run(document_id: str) -> ProcessingRunOut:
@@ -156,7 +158,12 @@ def get_document_facts(document_id: str, session: Session = Depends(session_depe
 
 @app.get("/documents/{document_id}/runs", response_model=list[ProcessingRunOut])
 def get_document_runs(document_id: str, session: Session = Depends(session_dependency)) -> list[ProcessingRunOut]:
-    runs = session.query(ProcessingRun).filter(ProcessingRun.document_id == document_id).all()
+    runs = (
+        session.query(ProcessingRun)
+        .filter(ProcessingRun.document_id == document_id)
+        .order_by(ProcessingRun.started_at.desc())
+        .all()
+    )
     return [ProcessingRunOut.model_validate(r) for r in runs]
 
 
@@ -232,12 +239,5 @@ def list_failures(session: Session = Depends(session_dependency)) -> list[Failur
 def search_facts(q: str, top_k: int = 10, session: Session = Depends(session_dependency)) -> list[SearchResult]:
     if not q.strip():
         return []
-    query_vec = embed_text(q)
-    facts = session.query(Fact).filter(Fact.is_valid == True).all()  # noqa: E712
-    scored = []
-    for fact in facts:
-        text = f"{fact.entity} {fact.predicate} {fact.object_text} {fact.source_text}"
-        score = cosine_similarity(query_vec, embed_text(text))
-        scored.append((fact, score))
-    scored.sort(key=lambda t: t[1], reverse=True)
-    return [SearchResult(fact=fact_to_schema(f), score=s) for f, s in scored[:top_k]]
+    scored = find_similar_facts(session, q, top_k=top_k)
+    return [SearchResult(fact=fact_to_schema(s.fact), score=s.score) for s in scored]
