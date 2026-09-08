@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from app.pipeline.extraction import RawExtractedFact
 from app.pipeline.normalization import normalize_date, normalize_number
 from app.pipeline.validation import ValidationResult, validate_fact
+from app.vector_store.embeddings import embed_text, fact_embedding_text
 
 
 def _confidence_level(score: float) -> str:
@@ -38,6 +39,7 @@ class BuiltFact:
     char_end: int | None
     confidence: float
     confidence_level: str
+    embedding: list[float]
     is_valid: bool
     validation_notes: str
 
@@ -99,6 +101,7 @@ def build_fact(raw: RawExtractedFact, chunk_text: str, page_number: int, num_pag
         char_end=validation.char_end,
         confidence=confidence,
         confidence_level=_confidence_level(confidence),
+        embedding=embed_text(fact_embedding_text(raw.entity, raw.predicate, raw.object_text, raw.source_text)),
         is_valid=validation.is_valid,
         validation_notes=validation.notes,
     )

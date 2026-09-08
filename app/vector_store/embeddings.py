@@ -34,6 +34,13 @@ _vectorizer = HashingVectorizer(
 )
 
 
+def fact_embedding_text(entity: str, predicate: str, object_text: str, source_text: str) -> str:
+    """Canonical text used to embed a fact - shared by fact-build-time
+    caching, candidate retrieval, and /search so one cached vector per
+    fact serves every use site consistently."""
+    return f"{entity} {predicate} {object_text} {source_text}"
+
+
 def embed_text(text: str) -> list[float]:
     if not text or not text.strip():
         return [0.0] * _VECTOR_DIM

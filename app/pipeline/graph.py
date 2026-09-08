@@ -15,10 +15,12 @@ claim LangGraph usage."
 """
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.database import get_session
 from app.db.models import Chunk, Document, Fact, FactRelationship, ProcessingRun
@@ -116,90 +118,149 @@ def node_ingest_and_chunk(state: PipelineState) -> PipelineState:
     return state
 
 
+def _extract_failure_fields(outcome) -> dict:
+    """Rate-limit failures get their own error_type/severity/suggestion so the
+    Failures tab reads as "known, handled, and why" rather than a wall of
+    identical stack traces - see llm_client's rate limiting docstring."""
+    if outcome.rate_limited:
+        return dict(
+            error_type="rate_limited",
+            severity="low",
+            suggested_improvement=(
+                "Gemini quota was exhausted; the built-in rate limiter/backoff "
+                "already retried before giving up, and a circuit breaker is now "
+                "skipping further calls for a cooldown window to avoid wasting "
+                "time on doomed requests. Wait for quota reset, raise "
+                "GEMINI_MAX_REQUESTS_PER_MINUTE headroom, or use a paid tier."
+            ),
+        )
+    return dict(
+        error_type="llm_call_failed",
+        severity="medium",
+        suggested_improvement="Retry with backoff, or fall back to a smaller/simpler prompt.",
+    )
+
+
+def _process_chunk(
+    document_id: str, run_id: str, filename: str, num_pages: int,
+    chunk_id: str, page_number: int, chunk_text: str,
+) -> list[str]:
+    """Runs the (blocking, possibly slow/retried) LLM extraction call for one
+    chunk, then persists its facts/failures immediately in their own short
+    session. Persisting per-chunk - rather than batching every chunk's
+    writes until the whole stage finishes - is what keeps /documents/{id}/facts
+    and /failures showing live progress on a large, many-chunk PDF instead of
+    going quiet for the entire extraction stage."""
+    outcome = extract_facts_from_chunk(filename, page_number, chunk_text)
+    new_fact_ids: list[str] = []
+
+    with get_session() as session:
+        if not outcome.ok:
+            record_failure(
+                session, stage="extraction",
+                error_message=outcome.error or "unknown extraction error",
+                run_id=run_id, document_id=document_id, chunk_id=chunk_id,
+                recovery_attempted=True, recovery_successful=False,
+                final_status="unresolved",
+                **_extract_failure_fields(outcome),
+            )
+            return new_fact_ids
+
+        for raw_fact in outcome.facts:
+            built = build_fact(raw_fact, chunk_text, page_number, num_pages)
+
+            if not built.is_valid:
+                record_failure(
+                    session, stage="validation", error_type="unsupported_evidence",
+                    error_message=(
+                        f"Fact '{built.entity} {built.predicate} {built.object_text}' "
+                        f"failed validation: {built.validation_notes}"
+                    ),
+                    run_id=run_id, document_id=document_id, chunk_id=chunk_id,
+                    severity="medium", recovery_attempted=True, recovery_successful=False,
+                    final_status="discarded",
+                    suggested_improvement=(
+                        "Tighten the extraction prompt's instruction to quote verbatim "
+                        "source text, or add a structured-repair pass that re-asks the "
+                        "LLM to fix only the source_text field."
+                    ),
+                )
+                # Still persisted (is_valid=False) so it's visible/inspectable,
+                # never silently dropped - but excluded from comparison.
+
+            fact = Fact(
+                document_id=document_id,
+                chunk_id=chunk_id,
+                entity=built.entity,
+                predicate=built.predicate,
+                object_text=built.object_text,
+                fact_type=built.fact_type,
+                value_type=built.value_type,
+                normalized_value=built.normalized_value,
+                unit=built.unit,
+                currency=built.currency,
+                date=built.date,
+                start_date=built.start_date,
+                end_date=built.end_date,
+                reporting_period=built.reporting_period,
+                scope=built.scope,
+                location=built.location,
+                qualifiers=built.qualifiers,
+                source_text=built.source_text,
+                page_number=built.page_number,
+                char_start=built.char_start,
+                char_end=built.char_end,
+                confidence=built.confidence,
+                confidence_level=built.confidence_level,
+                embedding=built.embedding,
+                extraction_method="llm",
+                is_valid=built.is_valid,
+                validation_notes=built.validation_notes,
+            )
+            session.add(fact)
+            session.flush()
+            new_fact_ids.append(fact.id)
+
+    return new_fact_ids
+
+
 def node_extract_facts(state: PipelineState) -> PipelineState:
     _set_stage(state["run_id"], "extract_facts")
     document_id = state["document_id"]
+    run_id = state["run_id"]
     fact_ids: list[str] = []
 
     with get_session() as session:
         doc = session.get(Document, document_id)
         filename = doc.filename
         num_pages = doc.num_pages
+        chunk_data = [
+            (chunk_id, session.get(Chunk, chunk_id).page_number, session.get(Chunk, chunk_id).text)
+            for chunk_id in state.get("chunk_ids", [])
+        ]
 
-        for chunk_id in state.get("chunk_ids", []):
-            chunk = session.get(Chunk, chunk_id)
-            outcome = extract_facts_from_chunk(filename, chunk.page_number, chunk.text)
-
-            if not outcome.ok:
-                record_failure(
-                    session, stage="extraction", error_type="llm_call_failed",
-                    error_message=outcome.error or "unknown extraction error",
-                    run_id=state["run_id"], document_id=document_id, chunk_id=chunk_id,
-                    severity="medium", recovery_attempted=True, recovery_successful=False,
-                    final_status="unresolved",
-                    suggested_improvement="Retry with backoff, or fall back to a smaller/simpler prompt.",
-                )
-                continue
-
-            for raw_fact in outcome.facts:
-                built = build_fact(raw_fact, chunk.text, chunk.page_number, num_pages)
-
-                if not built.is_valid:
-                    record_failure(
-                        session, stage="validation", error_type="unsupported_evidence",
-                        error_message=(
-                            f"Fact '{built.entity} {built.predicate} {built.object_text}' "
-                            f"failed validation: {built.validation_notes}"
-                        ),
-                        run_id=state["run_id"], document_id=document_id, chunk_id=chunk_id,
-                        severity="medium", recovery_attempted=True, recovery_successful=False,
-                        final_status="discarded",
-                        suggested_improvement=(
-                            "Tighten the extraction prompt's instruction to quote verbatim "
-                            "source text, or add a structured-repair pass that re-asks the "
-                            "LLM to fix only the source_text field."
-                        ),
-                    )
-                    # Still persisted (is_valid=False) so it's visible/inspectable,
-                    # never silently dropped - but excluded from comparison.
-
-                fact = Fact(
-                    document_id=document_id,
-                    chunk_id=chunk_id,
-                    entity=built.entity,
-                    predicate=built.predicate,
-                    object_text=built.object_text,
-                    fact_type=built.fact_type,
-                    value_type=built.value_type,
-                    normalized_value=built.normalized_value,
-                    unit=built.unit,
-                    currency=built.currency,
-                    date=built.date,
-                    start_date=built.start_date,
-                    end_date=built.end_date,
-                    reporting_period=built.reporting_period,
-                    scope=built.scope,
-                    location=built.location,
-                    qualifiers=built.qualifiers,
-                    source_text=built.source_text,
-                    page_number=built.page_number,
-                    char_start=built.char_start,
-                    char_end=built.char_end,
-                    confidence=built.confidence,
-                    confidence_level=built.confidence_level,
-                    extraction_method="llm",
-                    is_valid=built.is_valid,
-                    validation_notes=built.validation_notes,
-                )
-                session.add(fact)
-                session.flush()
-                fact_ids.append(fact.id)
-
-        run = session.get(ProcessingRun, state["run_id"])
-        run.facts_extracted = len(fact_ids)
+    # Extraction is one blocking LLM call per chunk, but chunks are
+    # independent of each other, so a bounded thread pool overlaps their
+    # network latency instead of paying it serially - the shared rate
+    # limiter in llm_client (not thread count) is what actually caps
+    # throughput, so this stays safe under the configured RPM regardless
+    # of how many workers run at once. Each worker persists its own chunk's
+    # results as soon as it finishes (see _process_chunk) so progress is
+    # visible incrementally rather than only once every chunk is done.
+    max_workers = max(1, min(settings.extraction_max_concurrency, len(chunk_data)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(_process_chunk, document_id, run_id, filename, num_pages, chunk_id, page_number, text)
+            for chunk_id, page_number, text in chunk_data
+        ]
+        for future in as_completed(futures):
+            fact_ids.extend(future.result())
+            with get_session() as session:
+                run = session.get(ProcessingRun, run_id)
+                run.facts_extracted = len(fact_ids)
 
     state["fact_ids"] = fact_ids
-    logger.info("Run %s: extracted %d facts", state["run_id"], len(fact_ids))
+    logger.info("Run %s: extracted %d facts", run_id, len(fact_ids))
     return state
 
 
@@ -209,6 +270,7 @@ def node_compare_facts(state: PipelineState) -> PipelineState:
     happen per-candidate-pair as one logical unit of work."""
     _set_stage(state["run_id"], "compare_facts")
     relationships_created = 0
+    entity_resolution_cache: dict = {}
 
     with get_session() as session:
         for fact_id in state.get("fact_ids", []):
@@ -216,7 +278,7 @@ def node_compare_facts(state: PipelineState) -> PipelineState:
             if fact is None or not fact.is_valid:
                 continue
 
-            candidates = find_candidates(session, fact)
+            candidates = find_candidates(session, fact, entity_resolution_cache=entity_resolution_cache)
             for candidate in candidates:
                 other = candidate.fact
 
@@ -243,18 +305,43 @@ def node_compare_facts(state: PipelineState) -> PipelineState:
                     continue
 
                 if not result.ok:
+                    if result.rate_limited:
+                        comparison_failure_fields = dict(
+                            error_type="rate_limited",
+                            severity="low",
+                            suggested_improvement=(
+                                "Gemini quota was exhausted; the built-in rate limiter/backoff "
+                                "already retried before giving up, and a circuit breaker is now "
+                                "skipping further calls for a cooldown window. Wait for quota "
+                                "reset or use a paid tier."
+                            ),
+                        )
+                    else:
+                        comparison_failure_fields = dict(
+                            error_type="llm_comparison_failed",
+                            severity="medium",
+                            suggested_improvement="Retry with backoff; fall back to UNCERTAIN with low confidence.",
+                        )
                     record_failure(
-                        session, stage="comparison", error_type="llm_comparison_failed",
+                        session, stage="comparison",
                         error_message=result.error or "unknown comparison error",
                         run_id=state["run_id"], document_id=state["document_id"], fact_id=fact.id,
-                        severity="medium", recovery_attempted=True, recovery_successful=False,
+                        recovery_attempted=True, recovery_successful=False,
                         final_status="unresolved",
-                        suggested_improvement="Retry with backoff; fall back to UNCERTAIN with low confidence.",
+                        **comparison_failure_fields,
                     )
                     continue
 
                 if result.relationship_type == "UNRELATED":
                     continue
+
+                contextual_dimensions = dict(result.contextual_dimensions or {})
+                if candidate.resolved_by_llm:
+                    contextual_dimensions["entity_resolution"] = {
+                        "triggered": True,
+                        "confidence": candidate.entity_resolution_confidence,
+                        "reasoning": candidate.entity_resolution_reasoning,
+                    }
 
                 rel = FactRelationship(
                     fact_a_id=fact.id,
@@ -265,7 +352,7 @@ def node_compare_facts(state: PipelineState) -> PipelineState:
                         "HIGH" if result.confidence >= 0.75 else "MEDIUM" if result.confidence >= 0.45 else "LOW"
                     ),
                     explanation=result.explanation,
-                    contextual_dimensions=result.contextual_dimensions,
+                    contextual_dimensions=contextual_dimensions,
                     reasoning_method=result.reasoning_method,
                 )
                 session.add(rel)
@@ -337,6 +424,11 @@ def get_compiled_graph():
 
 
 def run_pipeline(document_id: str, run_id: str, file_path: str) -> PipelineState:
+    with get_session() as session:
+        run = session.get(ProcessingRun, run_id)
+        if run:
+            run.status = "running"
+
     graph = get_compiled_graph()
     initial_state: PipelineState = {
         "document_id": document_id,

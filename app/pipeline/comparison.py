@@ -39,6 +39,7 @@ class ComparisonResult:
     reasoning_method: str  # deterministic | llm
     ok: bool = True
     error: str | None = None
+    rate_limited: bool = False
 
 
 def _values_agree(a: Fact, b: Fact, tolerance: float = 0.01) -> bool | None:
@@ -120,6 +121,7 @@ def llm_compare(fact_a: Fact, fact_b: Fact) -> ComparisonResult:
         return ComparisonResult(
             relationship_type="UNCERTAIN", confidence=0.0, explanation="LLM comparison failed",
             contextual_dimensions={}, reasoning_method="llm", ok=False, error=result.error,
+            rate_limited=result.rate_limited,
         )
 
     rel_type = str(result.data.get("relationship_type", "UNCERTAIN")).upper()

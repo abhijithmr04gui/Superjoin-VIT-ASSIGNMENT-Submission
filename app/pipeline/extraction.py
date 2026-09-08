@@ -41,6 +41,7 @@ class ExtractionOutcome:
     ok: bool
     error: str | None = None
     raw_response: str = ""
+    rate_limited: bool = False
 
 
 _REQUIRED_KEYS = {"entity", "predicate", "object_text", "source_text"}
@@ -88,7 +89,10 @@ def extract_facts_from_chunk(filename: str, page_number: int, chunk_text: str) -
         return ExtractionOutcome(facts=[], ok=False, error=str(exc))
 
     if not result.ok:
-        return ExtractionOutcome(facts=[], ok=False, error=result.error, raw_response=result.raw_text)
+        return ExtractionOutcome(
+            facts=[], ok=False, error=result.error, raw_response=result.raw_text,
+            rate_limited=result.rate_limited,
+        )
 
     items = result.data if isinstance(result.data, list) else []
     facts = [f for f in (_coerce(item) for item in items) if f is not None]
