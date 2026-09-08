@@ -16,7 +16,7 @@ with explicit confidence and explicit failure handling.
 
 ## Video Demo
 
-`[ADD LINK HERE — 3 minutes or less, see "Suggested demo script" below]`
+`[ADD LINK HERE — 3 minutes or less]`
 
 ## Setup and Run Instructions
 
@@ -350,30 +350,3 @@ them directly. Nothing is hidden to make a demo look cleaner.
 - Duplicate uploads are detected by file hash (`Document.file_hash`) and
   short-circuit to the existing document rather than reprocessing.
 
----
-
-## Suggested demo script (≤ 3 minutes)
-
-1. **0:00–0:20** — State the problem: facts scattered across PDFs, worded
-   differently, sometimes conflicting, sometimes only apparently
-   conflicting.
-2. **0:20–0:45** — Upload the Delhivery prospectus, annual report, and
-   earnings presentation from `data/starter-dataset/delhivery/`. Since
-   processing is now asynchronous and can take a few minutes per
-   document (one real LLM call per chunk), upload these ahead of time
-   and just show the completed documents live, rather than waiting for
-   `pending` → `completed` on camera.
-3. **0:45–1:15** — Open a FY24 revenue fact, show its evidence (page +
-   quoted source text).
-4. **1:15–1:40** — Show the corroborated relationship between two
-   independently worded revenue statements.
-5. **1:40–2:00** — Show the contradiction case (two figures for what
-   looks like the same period).
-6. **2:00–2:20** — Show the reconciliation case (different fiscal years
-   explain a value difference).
-7. **2:20–2:40** — Open the Failures tab: the Net Working Capital chart
-   extraction ambiguity, or a caught hallucinated-evidence case, with the
-   suggested improvement shown.
-8. **2:40–3:00** — One sentence on architecture (LangGraph pipeline,
-   local vector store, deterministic shortcut + LLM reasoning) and the
-   top limitation (chart/table structure loss).
