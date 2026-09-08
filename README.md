@@ -22,14 +22,16 @@ with explicit confidence and explicit failure handling.
 
 ### Prerequisites
 
-- Python 3.11+
-- An Anthropic API key (used for fact extraction, entity resolution, and
+- Python 3.11 or 3.12 (3.13 is not yet supported — the pinned
+  `PyMuPDF==1.24.10` has no prebuilt wheel for 3.13 and will fail to
+  compile from source)
+- A Gemini API key (used for fact extraction, entity resolution, and
   fact comparison)
 
 ### Installation
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/abhijithmr04gui/Superjoin-VIT-ASSIGNMENT.git
 cd superjoin-vit-2026
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
@@ -40,7 +42,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# then edit .env and set ANTHROPIC_API_KEY
+# then edit .env and set GEMINI_API_KEY
 ```
 
 See `.env.example` for every variable and its default. Nothing else
@@ -69,9 +71,14 @@ curl -X POST http://localhost:8000/documents/upload \
   -F "file=@data/starter-dataset/delhivery/03-delhivery-q4-fy24-earnings-presentation.pdf"
 ```
 
-Upload is synchronous in this prototype — the response only returns once
-ingestion, extraction, normalization, and comparison have all finished
-for that document (see Trade-offs).
+Upload is asynchronous: the response returns immediately with a
+`document` (status `uploaded`) and a `run` (status `pending`), and
+ingestion/extraction/normalization/comparison continue in a FastAPI
+background task. Poll `GET /documents/{document_id}/runs` until the run's
+`status` is `completed` (or `failed`) — `current_stage` and
+`facts_extracted` update as it progresses. The Streamlit UI polls this
+for you; `/documents/{document_id}/facts` and `/failures` are populated
+once the run finishes.
 
 ### Run tests
 
@@ -221,9 +228,15 @@ them directly. Nothing is hidden to make a demo look cleaner.
 
 ## Trade-offs
 
-- **Anthropic Claude, not a mix of providers** — the assignment only
-  needs one capable LLM behind focused prompts; adding a second provider
-  would add integration surface without adding capability here.
+- **Gemini, not a mix of providers** — the assignment only needs one
+  capable LLM behind focused prompts; adding a second provider would add
+  integration surface without adding capability here. Note: the free
+  tier's `generate_content_free_tier_requests` quota (20 requests/day for
+  `gemini-2.5-flash` at time of writing) is easy to exhaust on a single
+  multi-page PDF, since extraction issues one LLM call per chunk — a
+  paid tier or a smaller/cheaper model avoids mid-run `429
+  RESOURCE_EXHAUSTED` failures (these are still caught and surfaced via
+  `/failures`, not silently dropped).
 - **HashingVectorizer instead of a transformer embedding model** — it is
   stateless (no corpus-fit step), so adding document N+1 never requires
   re-embedding documents 1..N — genuinely incremental. It is also
@@ -243,13 +256,15 @@ them directly. Nothing is hidden to make a demo look cleaner.
   justification" for a prototype this size. `app/vector_store/store.py`
   isolates this decision behind two functions so swapping in a real
   vector DB later is a contained change.
-- **Synchronous upload processing, no background job queue** — simplest
-  correct behavior for a prototype and for a 3-minute demo (the response
-  itself shows facts/relationships extracted, no polling needed). Cost:
-  a very large PDF or a burst of uploads would block the request thread.
-  Documented next step: move `run_pipeline` to a background task/queue
-  (Celery/RQ or FastAPI `BackgroundTasks` + a `GET` status endpoint,
-  which already exists via `ProcessingRun`).
+- **Asynchronous upload processing via FastAPI `BackgroundTasks`, no
+  external job queue** — `/documents/upload` returns immediately and the
+  pipeline runs in-process in the background; the client polls `GET
+  /documents/{id}/runs` (backed by `ProcessingRun`) for progress. This
+  keeps the request thread free for large PDFs or concurrent uploads
+  without adding infrastructure (Celery/RQ). Cost: work is lost if the
+  server process restarts mid-run (no durable queue/retry across
+  restarts) — acceptable for a prototype, a real deployment would want
+  Celery/RQ or a durable task queue instead.
 - **Deterministic corroboration shortcut only ever fires on an exact
   match across every dimension** — intentionally conservative. It saves
   an LLM call in the easy case (see assignment section 30) without ever
@@ -299,8 +314,10 @@ them directly. Nothing is hidden to make a demo look cleaner.
   without row/column structure, which increases the risk of a numeric
   fact losing its row label context in a very dense table. A
   table-detection pass (e.g. `pdfplumber`) is the natural next step.
-- **Synchronous processing** (see Trade-offs above) — no background job
-  queue yet, so very large PDFs or many concurrent uploads will block.
+- **In-process background processing** (see Trade-offs above) — uploads
+  no longer block the request thread, but there is still no durable
+  external job queue, so a server restart mid-run loses that run's
+  progress.
 - **Vector retrieval quality** (see Trade-offs above) is lexical, not
   semantic. On facts that share almost no vocabulary despite being about
   the same underlying thing, candidate retrieval could miss them if
@@ -341,7 +358,11 @@ them directly. Nothing is hidden to make a demo look cleaner.
    differently, sometimes conflicting, sometimes only apparently
    conflicting.
 2. **0:20–0:45** — Upload the Delhivery prospectus, annual report, and
-   earnings presentation from `data/starter-dataset/delhivery/`.
+   earnings presentation from `data/starter-dataset/delhivery/`. Since
+   processing is now asynchronous and can take a few minutes per
+   document (one real LLM call per chunk), upload these ahead of time
+   and just show the completed documents live, rather than waiting for
+   `pending` → `completed` on camera.
 3. **0:45–1:15** — Open a FY24 revenue fact, show its evidence (page +
    quoted source text).
 4. **1:15–1:40** — Show the corroborated relationship between two
