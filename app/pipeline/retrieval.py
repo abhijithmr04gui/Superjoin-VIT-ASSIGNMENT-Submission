@@ -93,19 +93,20 @@ def find_candidates(
             and (predicate_match or vec_score >= 0.35)
             and _plausible_entity_pair(norm_entity, other_norm_entity)
         ):
-            cache_key = frozenset({norm_entity, other_norm_entity})
-            if cache_key not in entity_resolution_cache:
-                entity_resolution_cache[cache_key] = resolve_entity_match(
-                    fact.entity,
-                    f"{fact.predicate}: {fact.object_text}",
-                    other.entity,
-                    f"{other.predicate}: {other.object_text}",
-                )
-            er = entity_resolution_cache[cache_key]
-            if er.ok and er.same_entity is True and er.confidence >= _ENTITY_RESOLUTION_CONFIDENCE_THRESHOLD:
-                entity_match = True
-                resolved_by_llm = True
-                er_confidence, er_reasoning = er.confidence, er.reasoning
+            pass # Disable LLM entity resolution to save rate limit
+            # cache_key = frozenset({norm_entity, other_norm_entity})
+            # if cache_key not in entity_resolution_cache:
+            #     entity_resolution_cache[cache_key] = resolve_entity_match(
+            #         fact.entity,
+            #         f"{fact.predicate}: {fact.object_text}",
+            #         other.entity,
+            #         f"{other.predicate}: {other.object_text}",
+            #     )
+            # er = entity_resolution_cache[cache_key]
+            # if er.ok and er.same_entity is True and er.confidence >= _ENTITY_RESOLUTION_CONFIDENCE_THRESHOLD:
+            #     entity_match = True
+            #     resolved_by_llm = True
+            #     er_confidence, er_reasoning = er.confidence, er.reasoning
 
         if not (entity_match or predicate_match or vec_score >= 0.35):
             continue

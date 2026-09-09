@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     chunk_size_chars: int = 1200
     chunk_overlap_chars: int = 200
 
-    candidate_top_k: int = 8
+    candidate_top_k: int = 3
 
     @property
     def uploads_dir(self) -> Path:
